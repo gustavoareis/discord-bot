@@ -1,23 +1,23 @@
-# Discord Music Bot
+# Discord Bot
 
-Um bot de música para Discord que toca músicas do YouTube e permite buscar faixas, playlists e álbuns do Spotify (buscando no YouTube automaticamente).
+Um bot para Discord com funcionalidades de música e chat com IA.
 
 ## Funcionalidades
-- Comando `.play <link ou texto>`: Toca músicas do YouTube ou busca por nome/artista
-- Aceita links do Spotify (track, playlist, álbum) e converte para busca no YouTube
-- Comandos de fila: `.queue`, `.skip`, `.clear`, `.pause`, `.resume`, `.stop`, `.leave`
-- Suporte a múltiplos servidores
 
-## Como funciona
-- Ao receber um link do Spotify, o bot consulta a API do Spotify para obter nome e artista
-- Busca a música correspondente no YouTube e toca no canal de voz
-- Utiliza as bibliotecas `discord.py`, `yt-dlp`, `spotipy`
+### Música
+- Toca músicas do YouTube por link ou nome/artista
+- Aceita links do Spotify (track, playlist, álbum) e converte para busca no YouTube
+- Comandos de fila, pausa, pular, etc.
+
+### IA (Groq)
+- Conversa com IA usando o modelo `llama-3.3-70b-versatile` via Groq
+- Respostas curtas e diretas
 
 ## Pré-requisitos
 - Python 3.9+
-- Conta no Discord e Spotify (pode ser gratuita)
 - Token do bot Discord
 - Credenciais do Spotify Developer (Client ID e Secret)
+- API Key do Groq
 
 ## Instalação
 1. Clone o repositório
@@ -30,6 +30,7 @@ Um bot de música para Discord que toca músicas do YouTube e permite buscar fai
    DISCORD_TOKEN=seu_token_aqui
    SPOTIPY_CLIENT_ID=seu_client_id_aqui
    SPOTIPY_CLIENT_SECRET=seu_client_secret_aqui
+   GROQ_API_KEY=sua_api_key_aqui
    ```
 4. Execute o bot:
    ```bash
@@ -37,6 +38,8 @@ Um bot de música para Discord que toca músicas do YouTube e permite buscar fai
    ```
 
 ## Comandos
+
+### Música
 - `.play <url ou texto>` — Toca música do YouTube ou busca por nome/artista
 - `.play <link do Spotify>` — Busca a faixa/playlist/álbum no YouTube e toca
 - `.queue` — Mostra a fila
@@ -47,6 +50,10 @@ Um bot de música para Discord que toca músicas do YouTube e permite buscar fai
 - `.stop` — Para a música
 - `.leave` — Sai do canal de voz
 
+### Geral
+- `.salve` — Cumprimento do bot
+- `.chat <pergunta>` — Conversa com a IA
+
 ## Estrutura do Projeto
 ```
 discord-bot/
@@ -56,7 +63,8 @@ discord-bot/
 │   ├── spotify.py       # Helpers do Spotify (track, playlist, álbum)
 │   └── youtube.py       # YTDLSource e helpers do YouTube
 ├── cogs/
-│   └── music.py         # Comandos de música (Cog do discord.py)
+│   ├── music.py         # Comandos de música
+│   └── ai.py            # Comandos de IA
 ├── requirements.txt
 └── .env
 ```
