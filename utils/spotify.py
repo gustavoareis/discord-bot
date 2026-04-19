@@ -1,10 +1,16 @@
-import re
-
 from config import sp, SPOTIFY_TRACK_RE, SPOTIFY_PLAYLIST_RE, SPOTIFY_ALBUM_RE, MAX_PLAYLIST_ITEMS
 
 
-def spotify_id_from_url(url: str) -> str:
-    return url.split("/")[-1].split("?")[0].strip()
+def _spotify_id(url: str) -> str:
+    return url.split("/")[-1].split("?")[0]
+
+
+def _track_to_query(track: dict) -> tuple[str, str]:
+    name = (track.get("name") or "").strip()
+    artists = [a["name"].strip() for a in (track.get("artists") or []) if a.get("name")]
+    query = f"{name} {artists[0]}".strip() if artists else name
+    display = f"{name} - {', '.join(artists)}" if name and artists else name
+    return query or "unknown", display or "unknown"
 
 
 def is_spotify_track_url(url: str) -> bool:
@@ -19,90 +25,60 @@ def is_spotify_album_url(url: str) -> bool:
     return bool(SPOTIFY_ALBUM_RE.search(url))
 
 
-def spotify_track_to_query(track_obj: dict) -> tuple[str, str]:
-    name = (track_obj.get("name") or "").strip()
-    artists = track_obj.get("artists") or []
-    artist_names = [a.get("name", "").strip() for a in artists if a.get("name")]
-    artist = artist_names[0] if artist_names else ""
-    q = f"{name} {artist}".strip()
-
-    q = re.sub(r'[^\w\s\-\(\)]', '', q, flags=re.UNICODE)
-    q = re.sub(r'\s+', ' ', q).strip()
-
-    result = q if q else "unknown"
-    display = f"{name} - {', '.join(artist_names)}" if name and artist_names else name or "unknown"
-    return result, display
-
-
-def get_spotify_track_query(spotify_url: str) -> tuple[str, str] | None:
+def get_spotify_track_query(url: str) -> tuple[str, str] | None:
     try:
-        track = sp.track(spotify_id_from_url(spotify_url))
-        return spotify_track_to_query(track)
+        return _track_to_query(sp.track(_spotify_id(url)))
     except Exception:
         return None
 
 
-def get_spotify_playlist_queries(spotify_url: str, limit: int = MAX_PLAYLIST_ITEMS) -> list[tuple[str, str]] | None:
+def get_spotify_playlist_queries(url: str, limit: int = MAX_PLAYLIST_ITEMS) -> list[tuple[str, str]]:
     try:
-        playlist_id = spotify_id_from_url(spotify_url)
-        out: list[tuple[str, str]] = []
-        offset = 0
-        page_size = 100
-
+        out, offset = [], 0
         while len(out) < limit:
             resp = sp.playlist_items(
-                playlist_id,
-                limit=min(page_size, limit - len(out)),
+                _spotify_id(url),
+                limit=min(100, limit - len(out)),
                 offset=offset,
                 additional_types=("track",),
             )
             items = resp.get("items") or []
             if not items:
                 break
-
             for it in items:
-                tr = (it or {}).get("track")
-                if not tr:
-                    continue
-                if tr.get("is_local"):
-                    continue
-                out.append(spotify_track_to_query(tr))
+                track = (it or {}).get("track")
+                if track and not track.get("is_local"):
+                    q, d = _track_to_query(track)
+                    if q != "unknown":
+                        out.append((q, d))
                 if len(out) >= limit:
                     break
-
             offset += len(items)
             if not resp.get("next"):
                 break
-
-        return [(q, d) for q, d in out if q and q != "unknown"]
+        return out
     except Exception:
-        return None
+        return []
 
 
-def get_spotify_album_queries(spotify_url: str, limit: int = MAX_PLAYLIST_ITEMS) -> list[tuple[str, str]] | None:
+def get_spotify_album_queries(url: str, limit: int = MAX_PLAYLIST_ITEMS) -> list[tuple[str, str]]:
     try:
-        album_id = spotify_id_from_url(spotify_url)
-        out: list[tuple[str, str]] = []
-        offset = 0
-        page_size = 50
-
+        out, offset = [], 0
         while len(out) < limit:
-            resp = sp.album_tracks(album_id, limit=min(page_size, limit - len(out)), offset=offset)
+            resp = sp.album_tracks(_spotify_id(url), limit=min(50, limit - len(out)), offset=offset)
             items = resp.get("items") or []
             if not items:
                 break
-
-            for tr in items:
-                if not tr:
-                    continue
-                out.append(spotify_track_to_query(tr))
+            for track in items:
+                if track:
+                    q, d = _track_to_query(track)
+                    if q != "unknown":
+                        out.append((q, d))
                 if len(out) >= limit:
                     break
-
             offset += len(items)
             if not resp.get("next"):
                 break
-
-        return [(q, d) for q, d in out if q and q != "unknown"]
+        return out
     except Exception:
-        return None
+        return []

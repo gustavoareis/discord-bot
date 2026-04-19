@@ -1,78 +1,82 @@
 # Discord Bot
 
-Um bot para Discord com funcionalidades de música e chat com IA.
+Bot de Discord com módulos de música e IA.
 
 ## Funcionalidades
 
 ### Música
-- Toca músicas do YouTube por link ou nome/artista
-- Aceita links do Spotify (track, playlist, álbum) e converte para busca no YouTube
-- Comandos de fila, pausa, pular, etc.
+Reproduz áudio em canais de voz com suporte a YouTube e Spotify.
 
-### IA (Groq)
-- Conversa com IA usando o modelo `llama-3.3-70b-versatile` via Groq
-- Respostas curtas e diretas
+| Comando | Descrição |
+|---|---|
+| `.play <query>` | Toca uma música ou adiciona à fila (YouTube, Spotify ou busca por texto) |
+| `.queue` | Exibe a fila atual e o que está tocando |
+| `.skip` | Pula para a próxima música |
+| `.pause` | Pausa a reprodução |
+| `.resume` | Retoma a reprodução |
+| `.stop` | Para a música atual |
+| `.clear` | Limpa a fila e para a reprodução |
+| `.leave` | Desconecta do canal de voz |
 
-## Pré-requisitos
-- Python 3.9+
-- Token do bot Discord
-- Credenciais do Spotify Developer (Client ID e Secret)
-- API Key do Groq
+**Formatos aceitos pelo `.play`:**
+- Busca por texto: `.play never gonna give you up`
+- URL do YouTube: `.play https://youtube.com/watch?v=...`
+- Playlist do YouTube: `.play https://youtube.com/playlist?list=...`
+- Música do Spotify: `.play https://open.spotify.com/track/...`
+- Playlist do Spotify: `.play https://open.spotify.com/playlist/...`
+- Álbum do Spotify: `.play https://open.spotify.com/album/...`
+
+### IA
+| Comando | Descrição |
+|---|---|
+| `.chat <pergunta>` | Envia uma pergunta para o modelo Llama 3.3 70B via Groq |
 
 ## Instalação
-1. Clone o repositório
-2. Instale as dependências:
-   ```bash
-   pip install -r requirements.txt
-   ```
-3. Crie um arquivo `.env` com:
-   ```env
-   DISCORD_TOKEN=seu_token_aqui
-   SPOTIPY_CLIENT_ID=seu_client_id_aqui
-   SPOTIPY_CLIENT_SECRET=seu_client_secret_aqui
-   GROQ_API_KEY=sua_api_key_aqui
-   ```
-4. Execute o bot:
-   ```bash
-   python main.py
-   ```
 
-## Comandos
+**Pré-requisitos:** Python 3.10+, FFmpeg instalado e no PATH.
 
-### Música
-- `.play <url ou texto>` — Toca música do YouTube ou busca por nome/artista
-- `.play <link do Spotify>` — Busca a faixa/playlist/álbum no YouTube e toca
-- `.queue` — Mostra a fila
-- `.skip` — Pula para a próxima
-- `.clear` — Limpa a fila
-- `.pause` — Pausa a música
-- `.resume` — Continua a música
-- `.stop` — Para a música
-- `.leave` — Sai do canal de voz
+```bash
+# Clone o repositório
+git clone https://github.com/gustavoareis/discord-bot.git
+cd discord-bot
 
-### Geral
-- `.salve` — Cumprimento do bot
-- `.chat <pergunta>` — Conversa com a IA
+# Crie e ative o ambiente virtual
+python -m venv .venv
+source .venv/bin/activate  # Windows: .venv\Scripts\activate
 
-## Estrutura do Projeto
-```
-discord-bot/
-├── main.py              # Entrada: cria o bot e carrega os cogs
-├── config.py            # Configurações (ytdl, spotify, constantes)
-├── utils/
-│   ├── spotify.py       # Helpers do Spotify (track, playlist, álbum)
-│   └── youtube.py       # YTDLSource e helpers do YouTube
-├── cogs/
-│   ├── music.py         # Comandos de música
-│   └── ai.py            # Comandos de IA
-├── requirements.txt
-└── .env
+# Instale as dependências
+pip install -r requirements.txt
 ```
 
-## Observações
-- O bot **não toca áudio diretamente do Spotify** (por restrições da API), apenas busca no YouTube
-- Para melhor funcionamento, mantenha o `yt-dlp` sempre atualizado
-- O bot funciona em múltiplos servidores simultaneamente
+## Configuração
+
+Copie o arquivo de exemplo e preencha as variáveis:
+
+```bash
+cp .exemple.env .env
+```
+
+```env
+DISCORD_TOKEN=        # Token do bot no Discord Developer Portal
+SPOTIPY_CLIENT_ID=    # Client ID do app no Spotify for Developers
+SPOTIPY_CLIENT_SECRET=# Client Secret do app no Spotify for Developers
+GROQ_API_KEY=         # Chave de API da Groq
+```
+
+## Executar
+
+```bash
+python main.py
+```
+
+## Tecnologias
+
+- [discord.py](https://discordpy.readthedocs.io/) — framework do bot
+- [yt-dlp](https://github.com/yt-dlp/yt-dlp) — download e stream de áudio do YouTube
+- [spotipy](https://spotipy.readthedocs.io/) — integração com a API do Spotify
+- [Groq](https://groq.com/) — inferência de LLM (Llama 3.3 70B)
+- [PyNaCl](https://pynacl.readthedocs.io/) — suporte a voz no Discord
 
 ## Licença
-MIT
+
+[MIT](LICENSE)

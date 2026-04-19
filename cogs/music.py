@@ -1,230 +1,203 @@
 import asyncio
+import random
+import time
 from collections import defaultdict, deque
 
 import discord
 from discord.ext import commands
 
-from config import MAX_PLAYLIST_ITEMS
+from config import ytdl, FFMPEG_OPTIONS, YOUTUBE_RE, MAX_PLAYLIST_ITEMS
 from utils.spotify import (
     is_spotify_track_url, is_spotify_playlist_url, is_spotify_album_url,
     get_spotify_track_query, get_spotify_playlist_queries, get_spotify_album_queries,
 )
-from utils.youtube import (
-    is_youtube_url, looks_like_playlist_url, make_watch_url_from_entry, YTDLSource,
-)
+
+_ytdl_lock = asyncio.Lock()
+_ytdl_next_call = 0.0
+_REQUEST_GAP = 2.0
+
+
+def _is_youtube_url(text: str) -> bool:
+    return bool(YOUTUBE_RE.match(text.strip()))
+
+
+def _is_playlist_url(url: str) -> bool:
+    return "list=" in url
+
+
+def _watch_url(entry: dict) -> str | None:
+    if not entry:
+        return None
+    if entry.get("webpage_url"):
+        return entry["webpage_url"]
+    url = entry.get("url", "")
+    return url if url.startswith("http") else None
+
+
+async def _extract_info(query: str) -> dict:
+    global _ytdl_next_call
+    loop = asyncio.get_running_loop()
+
+    async with _ytdl_lock:
+        wait = _ytdl_next_call - time.monotonic()
+        if wait > 0:
+            await asyncio.sleep(wait)
+
+        data, last_err = None, None
+        for attempt in range(3):
+            try:
+                data = await loop.run_in_executor(None, lambda: ytdl.extract_info(query, download=False))
+                break
+            except Exception as e:
+                last_err = e
+                if attempt < 2:
+                    await asyncio.sleep(2 ** attempt + random.uniform(0, 0.5))
+
+        _ytdl_next_call = time.monotonic() + _REQUEST_GAP + random.uniform(0, 1.0)
+
+    if data is None:
+        raise last_err or ValueError("Falha ao extrair informações.")
+    return data
+
+
+async def _resolve(item: dict) -> dict:
+    query = item["query"]
+    data = await _extract_info(query if query.startswith("http") else f"ytsearch1:{query}")
+
+    if "entries" in data:
+        entries = [e for e in (data.get("entries") or []) if e]
+        if not entries:
+            raise ValueError("Sem resultados.")
+        data = entries[0]
+
+    if not data.get("url"):
+        raise ValueError("Sem stream disponível (bloqueado ou indisponível).")
+
+    if item.get("display"):
+        data["display_title"] = item["display"]
+    return data
 
 
 class Music(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        self.guild_queues: defaultdict[int, deque] = defaultdict(deque)
-        self.guild_now_playing: dict[int, dict] = {}
-        self.guild_locks: defaultdict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
+        self.queues: defaultdict[int, deque] = defaultdict(deque)
+        self.now_playing: dict[int, dict] = {}
+        self.locks: defaultdict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
 
-    def get_queue(self, guild_id: int) -> deque:
-        return self.guild_queues[guild_id]
+    def _enqueue(self, guild_id: int, query: str, display: str | None = None):
+        self.queues[guild_id].append({"query": query, "display": display})
 
-    def get_lock(self, guild_id: int) -> asyncio.Lock:
-        return self.guild_locks[guild_id]
-
-    async def ensure_voice(self, ctx) -> discord.VoiceClient | None:
-        vc = ctx.voice_client
-        if vc and vc.is_connected():
-            return vc
-
+    async def _ensure_voice(self, ctx) -> discord.VoiceClient | None:
+        if ctx.voice_client and ctx.voice_client.is_connected():
+            return ctx.voice_client
         if ctx.author.voice and ctx.author.voice.channel:
             return await ctx.author.voice.channel.connect()
-
         await ctx.send("Entre em um canal de voz primeiro.")
         return None
 
-    def enqueue_search_strings(self, ctx, searches: list[tuple[str, str] | str]) -> int:
-        q = self.get_queue(ctx.guild.id)
-        for s in searches:
-            if isinstance(s, tuple):
-                query, display = s
-                q.append({"_type": "search", "query": query, "display_title": display})
-            else:
-                q.append({"_type": "search", "query": s})
-        return len(searches)
+    async def _add_to_queue(self, ctx, query: str) -> int:
+        if is_spotify_track_url(query):
+            result = get_spotify_track_query(query)
+            if not result:
+                await ctx.send("Erro ao buscar a música no Spotify.")
+                return 0
+            self._enqueue(ctx.guild.id, *result)
+            return 1
 
-    def enqueue_watch_urls(self, ctx, urls: list[str]) -> int:
-        q = self.get_queue(ctx.guild.id)
-        for u in urls:
-            q.append({"_type": "ytwatch", "url": u})
-        return len(urls)
+        if is_spotify_playlist_url(query):
+            tracks = get_spotify_playlist_queries(query)
+            if not tracks:
+                await ctx.send("Não consegui ler essa playlist do Spotify.")
+                return 0
+            for q, d in tracks:
+                self._enqueue(ctx.guild.id, q, d)
+            return len(tracks)
 
-    async def enqueue_youtube(self, ctx, yt_query: str) -> int:
-        if is_youtube_url(yt_query) and looks_like_playlist_url(yt_query):
-            data = await YTDLSource.extract_info(yt_query, loop=self.bot.loop)
-            entries = data.get("entries") or []
-            urls: list[str] = []
+        if is_spotify_album_url(query):
+            tracks = get_spotify_album_queries(query)
+            if not tracks:
+                await ctx.send("Não consegui ler esse álbum do Spotify.")
+                return 0
+            for q, d in tracks:
+                self._enqueue(ctx.guild.id, q, d)
+            return len(tracks)
 
-            for entry in entries:
-                if not entry or len(urls) >= MAX_PLAYLIST_ITEMS:
-                    break
-                watch = make_watch_url_from_entry(entry)
-                if watch:
-                    urls.append(watch)
+        if _is_youtube_url(query) and _is_playlist_url(query):
+            data = await _extract_info(query)
+            entries = [e for e in (data.get("entries") or []) if e]
+            urls = [u for e in entries[:MAX_PLAYLIST_ITEMS] if (u := _watch_url(e))]
+            for url in urls:
+                self._enqueue(ctx.guild.id, url)
+            return len(urls)
 
-            return self.enqueue_watch_urls(ctx, urls)
+        self._enqueue(ctx.guild.id, query)
+        return 1
 
-        if is_youtube_url(yt_query):
-            return self.enqueue_watch_urls(ctx, [yt_query])
-
-        data = await YTDLSource.extract_info(yt_query, loop=self.bot.loop)
-        entries = data.get("entries") or []
-        if not entries:
-            return 0
-        first = entries[0]
-        watch = make_watch_url_from_entry(first)
-        if not watch:
-            return 0
-        return self.enqueue_watch_urls(ctx, [watch])
-
-    async def resolve_queue_item_to_ytdlp_data(self, item: dict) -> dict:
-        t = item.get("_type")
-        display_title = item.get("display_title")
-
-        if t == "search":
-            query = item.get("query", "").strip()
-            if not query:
-                raise ValueError("Busca vazia.")
-            data = await YTDLSource.extract_info(f"ytsearch1:{query}", loop=self.bot.loop)
-            entries = data.get("entries") or []
-            if not entries:
-                raise ValueError(f"Nenhum resultado no YouTube para: {query}")
-            watch = make_watch_url_from_entry(entries[0])
-            if not watch:
-                raise ValueError("Não consegui montar URL do resultado.")
-            item = {"_type": "ytwatch", "url": watch, "display_title": display_title}
-            t = "ytwatch"
-
-        if t == "ytwatch":
-            url = item.get("url", "").strip()
-            if not url:
-                raise ValueError("URL vazia.")
-            data = await YTDLSource.extract_info(url, loop=self.bot.loop)
-
-            if "entries" in data:
-                entries = data.get("entries") or []
-                entries = [e for e in entries if e]
-                if not entries:
-                    raise ValueError("Item indisponível.")
-                data = entries[0]
-
-            if not data.get("url"):
-                raise ValueError("Sem stream (vídeo indisponível/bloqueado).")
-
-            if display_title:
-                data["display_title"] = display_title
-
-            return data
-
-        return item
-
-    async def start_playback_if_idle(self, ctx):
-        lock = self.get_lock(ctx.guild.id)
-        async with lock:
+    async def _play_next(self, ctx):
+        async with self.locks[ctx.guild.id]:
             vc = ctx.voice_client
-            if not vc or not vc.is_connected():
+            if not vc or not vc.is_connected() or vc.is_playing() or vc.is_paused():
                 return
 
-            if vc.is_playing() or vc.is_paused():
-                return
-
-            q = self.get_queue(ctx.guild.id)
+            q = self.queues[ctx.guild.id]
             while q:
                 item = q.popleft()
                 try:
-                    data = await self.resolve_queue_item_to_ytdlp_data(item)
-                    self.guild_now_playing[ctx.guild.id] = data
-                    player = await YTDLSource.from_data(data)
+                    data = await _resolve(item)
+                    self.now_playing[ctx.guild.id] = data
+                    source = discord.PCMVolumeTransformer(
+                        discord.FFmpegPCMAudio(data["url"], **FFMPEG_OPTIONS)
+                    )
                     break
                 except Exception as e:
                     await ctx.send(f"Pulando item (erro): {e}")
             else:
-                self.guild_now_playing.pop(ctx.guild.id, None)
+                self.now_playing.pop(ctx.guild.id, None)
                 return
 
-            def _after(err):
+            def after(err):
                 if err:
                     print(f"Erro no player: {err}")
-                asyncio.run_coroutine_threadsafe(
-                    self.start_playback_if_idle(ctx), self.bot.loop
-                )
+                asyncio.run_coroutine_threadsafe(self._play_next(ctx), self.bot.loop)
 
-            vc.play(player, after=_after)
-
-            display = data.get("display_title") or player.title
-            if player.webpage_url:
-                await ctx.send(f"Tocando agora: [{display}](<{player.webpage_url}>)")
-            else:
-                await ctx.send(f"Tocando agora: {display}")
+            vc.play(source, after=after)
+            title = data.get("display_title") or data.get("title") or "Sem título"
+            url = data.get("webpage_url")
+            msg = f"Tocando agora: [{title}](<{url}>)" if url else f"Tocando agora: {title}"
+            await ctx.send(msg)
 
     @commands.command(name="play")
     async def play(self, ctx, *, query: str):
-        vc = await self.ensure_voice(ctx)
+        vc = await self._ensure_voice(ctx)
         if not vc:
             return
 
-        query = query.strip()
-
         async with ctx.typing():
             try:
-                if is_spotify_track_url(query):
-                    result = get_spotify_track_query(query)
-                    if not result:
-                        await ctx.send("Erro ao buscar a música no Spotify.")
-                        return
-                    added = self.enqueue_search_strings(ctx, [result])
-
-                elif is_spotify_playlist_url(query):
-                    qs = get_spotify_playlist_queries(query, limit=MAX_PLAYLIST_ITEMS)
-                    if not qs:
-                        await ctx.send("Não consegui ler essa playlist do Spotify.")
-                        return
-                    added = self.enqueue_search_strings(ctx, qs)
-
-                elif is_spotify_album_url(query):
-                    qs = get_spotify_album_queries(query, limit=MAX_PLAYLIST_ITEMS)
-                    if not qs:
-                        await ctx.send("Não consegui ler esse álbum do Spotify.")
-                        return
-                    added = self.enqueue_search_strings(ctx, qs)
-
-                else:
-                    added = await self.enqueue_youtube(ctx, query)
-
+                added = await self._add_to_queue(ctx, query.strip())
             except Exception as e:
                 await ctx.send(f"Não consegui adicionar isso na fila: {e}")
                 return
 
         if added == 0:
-            await ctx.send("Não consegui adicionar nada na fila.")
             return
-
-        if added == 1:
+        elif added == 1:
             await ctx.send("Adicionado 1 item na fila.")
+        elif added >= MAX_PLAYLIST_ITEMS:
+            await ctx.send(f"Adicionados {added} itens na fila (limitado a {MAX_PLAYLIST_ITEMS}).")
         else:
-            if added >= MAX_PLAYLIST_ITEMS:
-                await ctx.send(f"Adicionados {added} itens na fila (limitado a {MAX_PLAYLIST_ITEMS}).")
-            else:
-                await ctx.send(f"Adicionados {added} itens na fila.")
+            await ctx.send(f"Adicionados {added} itens na fila.")
 
-        await self.start_playback_if_idle(ctx)
+        await self._play_next(ctx)
 
     @commands.command(name="queue")
     async def queue_cmd(self, ctx):
-        q = self.get_queue(ctx.guild.id)
-        now = self.guild_now_playing.get(ctx.guild.id)
+        now = self.now_playing.get(ctx.guild.id)
+        q = self.queues[ctx.guild.id]
 
-        lines = []
-        if now:
-            title = now.get("display_title") or now.get("title") or "Sem título"
-            lines.append(f"Agora: {title}")
-        else:
-            lines.append("Agora: nada tocando.")
+        current = now.get("display_title") or now.get("title") or "Sem título" if now else "nada tocando"
+        lines = [f"Agora: {current}"]
 
         if not q:
             lines.append("Fila: vazia.")
@@ -232,55 +205,23 @@ class Music(commands.Cog):
             return
 
         lines.append("Fila:")
-        preview = list(q)[:10]
-        for i, item in enumerate(preview, start=1):
-            t = item.get("_type")
-            if t == "search":
-                label = item.get("display_title") or item.get("query") or "Sem título"
-                lines.append(f"{i}. {label}")
-            elif t == "ytwatch":
-                lines.append(f"{i}. {item.get('url') or 'Sem título'}")
-            else:
-                lines.append(f"{i}. Sem título")
-
+        for i, item in enumerate(list(q)[:10], 1):
+            lines.append(f"{i}. {item.get('display') or item.get('query') or 'Sem título'}")
         if len(q) > 10:
             lines.append(f"... e mais {len(q) - 10} item(ns).")
-
         await ctx.send("\n".join(lines))
 
     @commands.command(name="skip")
     async def skip(self, ctx):
         vc = ctx.voice_client
         if not vc or not vc.is_connected():
-            await ctx.send("Eu não estou em canal de voz.")
+            await ctx.send("Não estou em canal de voz.")
             return
-
         if vc.is_playing() or vc.is_paused():
             vc.stop()
-            await ctx.send("Pulando para a próxima...")
+            await ctx.send("Pulando...")
         else:
             await ctx.send("Nada tocando agora.")
-
-    @commands.command(name="clear")
-    async def clear(self, ctx):
-        q = self.get_queue(ctx.guild.id)
-        q.clear()
-
-        vc = ctx.voice_client
-        if vc and (vc.is_playing() or vc.is_paused()):
-            vc.stop()
-
-        self.guild_now_playing.pop(ctx.guild.id, None)
-        await ctx.send("Fila limpa.")
-
-    @commands.command(name="stop")
-    async def stop(self, ctx):
-        vc = ctx.voice_client
-        if vc and vc.is_playing():
-            vc.stop()
-            await ctx.send("Música parada!")
-        else:
-            await ctx.send("Nenhuma música tocando.")
 
     @commands.command(name="pause")
     async def pause(self, ctx):
@@ -300,16 +241,33 @@ class Music(commands.Cog):
         else:
             await ctx.send("Nada pausado agora.")
 
+    @commands.command(name="stop")
+    async def stop(self, ctx):
+        vc = ctx.voice_client
+        if vc and vc.is_playing():
+            vc.stop()
+            await ctx.send("Música parada!")
+        else:
+            await ctx.send("Nenhuma música tocando.")
+
+    @commands.command(name="clear")
+    async def clear(self, ctx):
+        self.queues[ctx.guild.id].clear()
+        vc = ctx.voice_client
+        if vc and (vc.is_playing() or vc.is_paused()):
+            vc.stop()
+        self.now_playing.pop(ctx.guild.id, None)
+        await ctx.send("Fila limpa.")
+
     @commands.command(name="leave")
     async def leave(self, ctx):
-        if ctx.voice_client and ctx.voice_client.is_connected():
-            q = self.get_queue(ctx.guild.id)
-            q.clear()
-            self.guild_now_playing.pop(ctx.guild.id, None)
-            await ctx.voice_client.disconnect()
-            await ctx.send("Sai do canal de voz.")
-        else:
-            await ctx.send("Eu não estou em canal de voz.")
+        if not ctx.voice_client or not ctx.voice_client.is_connected():
+            await ctx.send("Não estou em canal de voz.")
+            return
+        self.queues[ctx.guild.id].clear()
+        self.now_playing.pop(ctx.guild.id, None)
+        await ctx.voice_client.disconnect()
+        await ctx.send("Saindo do canal de voz.")
 
 
 async def setup(bot: commands.Bot):
